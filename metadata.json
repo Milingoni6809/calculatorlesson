@@ -1,0 +1,6 @@
+{
+  "name": "Sharp EL-738 Financial Calculator Guide & Emulator",
+  "description": "Developed by MD Tshigomana aka Mr Chigs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
