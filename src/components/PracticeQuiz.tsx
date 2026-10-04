@@ -1,7 +1,15 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { QuizQuestion } from '../types';
-import { Award, CheckCircle, XCircle, HelpCircle, ArrowRight, RotateCcw } from 'lucide-react';
+import { Award, CheckCircle, XCircle, HelpCircle, ArrowRight, RotateCcw, Volume2, Square, Sparkles } from 'lucide-react';
 import { formatFinancial } from '../utils/financialMath';
+import {
+  playInstructionSpeech,
+  stopInstructionSpeech,
+  subscribeSpeechProgress,
+  SpeechProgressInfo,
+  unlockAudio,
+} from '../utils/speech';
+import { HighlightedScenario } from './HighlightedScenario';
 
 interface PracticeQuizProps {
   questions: QuizQuestion[];
@@ -19,8 +27,42 @@ export const PracticeQuiz: React.FC<PracticeQuizProps> = ({
   const [feedback, setFeedback] = useState<{ isCorrect: boolean; message: string } | null>(null);
   const [score, setScore] = useState(0);
   const [completedList, setCompletedList] = useState<string[]>([]);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [speechProgress, setSpeechProgress] = useState<SpeechProgressInfo>({
+    speaking: false,
+    text: '',
+    charIndex: 0,
+    word: '',
+    progress: 0,
+  });
 
   const q = questions[currentIdx];
+
+  // Subscribe to speech progress for yellow highlight
+  useEffect(() => {
+    const unsub = subscribeSpeechProgress((info) => {
+      setSpeechProgress(info);
+      setIsSpeaking(info.speaking);
+    });
+    return () => {
+      unsub();
+      stopInstructionSpeech();
+    };
+  }, []);
+
+  const handleReadQuizQuestion = () => {
+    unlockAudio();
+    if (isSpeaking) {
+      stopInstructionSpeech();
+      return;
+    }
+    const introText = `Hello, I am Teacher Chigs! In this quiz challenge, here is the problem: ${q.scenario}. Find the target variable: ${q.targetVariable}.`;
+    playInstructionSpeech(introText, {
+      voiceId: 'Chigoxa',
+      rate: 1.0,
+      allowDeviceFallback: true,
+    });
+  };
 
   const handleCheckAnswer = () => {
     const parsed = parseFloat(userAnswer.replace(/,/g, ''));
@@ -132,16 +174,53 @@ export const PracticeQuiz: React.FC<PracticeQuizProps> = ({
 
       {/* Problem Card */}
       <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 mb-4">
-        <div className="flex items-center justify-between mb-1.5">
-          <h4 className="font-bold text-slate-900 text-sm">{q.title}</h4>
-          <span className="text-[11px] font-mono font-bold bg-white text-blue-700 px-2 py-0.5 rounded border border-slate-200">
-            Find: [{q.targetVariable}]
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <div className="flex items-center gap-2">
+            <h4 className="font-bold text-slate-900 text-sm">{q.title}</h4>
+            <span className="text-[10px] bg-amber-100 text-amber-900 font-bold px-2 py-0.5 rounded-full">
+              Teacher Chigs Quiz
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleReadQuizQuestion}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold transition-all cursor-pointer ${
+                isSpeaking
+                  ? 'bg-rose-600 hover:bg-rose-700 text-white animate-pulse'
+                  : 'bg-amber-500 hover:bg-amber-600 text-white hover:scale-[1.02]'
+              }`}
+              title={isSpeaking ? 'Stop Teacher Chigs voice' : 'Listen to problem read aloud'}
+            >
+              {isSpeaking ? (
+                <>
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                  <span>Stop</span>
+                </>
+              ) : (
+                <>
+                  <Volume2 className="w-3.5 h-3.5" />
+                  <span>Listen to Problem</span>
+                </>
+              )}
+            </button>
+            <span className="text-[11px] font-mono font-bold bg-white text-blue-700 px-2 py-0.5 rounded border border-slate-200">
+              Find: [{q.targetVariable}]
+            </span>
+          </div>
         </div>
 
-        <p className="text-[12pt] sm:text-[13pt] text-slate-900 font-semibold leading-relaxed mb-3">
-          {q.scenario}
-        </p>
+        {/* Problem statement in Font Size 12 with real-time yellow highlight on voice speech */}
+        <div className="p-3 bg-white rounded-lg border border-slate-200 mb-3 shadow-2xs">
+          <HighlightedScenario
+            scenario={q.scenario}
+            spokenText={speechProgress.text}
+            speechCharIndex={speechProgress.charIndex}
+            speechWord={speechProgress.word}
+            isSpeaking={isSpeaking}
+            fontSizePt={12}
+          />
+        </div>
 
         {/* Given values chips */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">

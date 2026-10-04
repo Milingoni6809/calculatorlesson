@@ -26,10 +26,13 @@ import {
   playInstructionSpeech,
   stopInstructionSpeech,
   subscribeSpeechState,
+  subscribeSpeechProgress,
+  SpeechProgressInfo,
   getVoiceStatus,
   VoiceStatus,
   unlockAudio,
 } from '../utils/speech';
+import { HighlightedScenario } from './HighlightedScenario';
 
 interface LessonViewerProps {
   lessons: Lesson[];
@@ -64,6 +67,13 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
     inworldConfigured: false,
     activeProvider: 'Chigoxa Voice',
   });
+  const [speechProgress, setSpeechProgress] = useState<SpeechProgressInfo>({
+    speaking: false,
+    text: '',
+    charIndex: 0,
+    word: '',
+    progress: 0,
+  });
   const lastSpokenKeyRef = useRef<string>('');
 
   const currentLesson = lessons.find((l) => l.id === activeLessonId) || lessons[0];
@@ -81,11 +91,12 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
         return l.category === selectedCategory;
       });
 
-  // Track speech state subscription
+  // Track speech state and real-time word boundary progress
   useEffect(() => {
-    const unsubscribe = subscribeSpeechState((speaking, text) => {
-      setIsSpeaking(speaking);
-      setSpokenText(text);
+    const unsubscribe = subscribeSpeechProgress((info) => {
+      setSpeechProgress(info);
+      setIsSpeaking(info.speaking);
+      setSpokenText(info.text);
     });
 
     getVoiceStatus().then((status) => {
@@ -160,6 +171,17 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
     speakInstruction(introText, `${activeLessonId}:teacher-intro:${Date.now()}`);
   };
 
+  // Dedicated function to have Teacher Chigs read the question/problem aloud with yellow highlighting
+  const handleReadQuestionOnly = () => {
+    unlockAudio();
+    if (isSpeaking && spokenText.includes(currentLesson.scenario)) {
+      stopInstructionSpeech();
+      return;
+    }
+    const introQuestionText = `Hello, I am Teacher Chigs! Here is the problem to solve: ${currentLesson.scenario}`;
+    speakInstruction(introQuestionText, `${activeLessonId}:question:${Date.now()}`);
+  };
+
   // Read current active step manually
   const handleReadCurrentStep = () => {
     unlockAudio();
@@ -169,14 +191,14 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
     }
     if (!isLessonComplete && activeStep) {
       if (currentStepIndex === 0) {
-        const introText = `Hello, I am Teacher Chigs! Problem: ${currentLesson.scenario}. Step 1: ${activeStep.desc}`;
+        const introText = `Hello, I am Teacher Chigs! In this lesson, our problem to solve is: ${currentLesson.scenario}. Step 1: ${activeStep.desc}`;
         speakInstruction(introText, `${activeLessonId}:${currentStepIndex}:${Date.now()}`);
       } else {
         const stepText = `Step ${currentStepIndex + 1}: ${activeStep.desc}`;
         speakInstruction(stepText, `${activeLessonId}:${currentStepIndex}:${Date.now()}`);
       }
     } else if (isLessonComplete) {
-      const completeText = `Teacher Chigs here! Congratulations! You have completed all steps for ${currentLesson.title}. ${currentLesson.summaryTip || 'Great job mastering this financial calculation!'}`;
+      const completeText = `Teacher Chigs here! Congratulations! You have completed all steps for ${currentLesson.title}. ${currentLesson.summaryTip || 'Great job mastering this financial calculation on the Sharp EL-738!'}`;
       speakInstruction(completeText, `${activeLessonId}:complete:${Date.now()}`);
     }
   };
@@ -337,12 +359,16 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
         {/* ACTIVE QUESTION & PROBLEM STATEMENT (ALWAYS VISIBLE DURING GUIDED NARRATION) */}
         {/* ======================================================== */}
         <div className="mb-4 p-4 bg-gradient-to-r from-blue-50/95 via-indigo-50/50 to-blue-50/95 border-2 border-blue-200/90 rounded-xl shadow-2xs">
-          <div className="flex items-center justify-between gap-2 mb-2 pb-1.5 border-b border-blue-100">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2 pb-1.5 border-b border-blue-100">
             <span className="font-bold text-xs uppercase tracking-wider text-blue-900 flex items-center gap-1.5">
               <BookOpen className="w-4 h-4 text-blue-600 shrink-0" />
               <span>Question / Problem to Solve (Font Size 12):</span>
             </span>
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[10px] bg-yellow-100 text-yellow-900 border border-yellow-300 font-bold px-2 py-0.5 rounded-full flex items-center gap-1 shadow-2xs">
+                <span className="w-2 h-2 rounded-full bg-yellow-400"></span>
+                <span>Voice Yellow Highlight</span>
+              </span>
               <span className="text-[10px] bg-indigo-100 text-indigo-800 font-bold px-2 py-0.5 rounded-full">
                 Teacher Chigs Guide
               </span>
@@ -352,15 +378,25 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
             </div>
           </div>
 
-          {/* Question problem statement in Font Size 12 */}
-          <p className="text-[12pt] sm:text-[13pt] text-slate-950 font-semibold leading-relaxed">
-            {currentLesson.scenario}
-          </p>
+          {/* Question problem statement in Font Size 12 with real-time yellow highlight on voice narration */}
+          <div className="p-3.5 bg-white/95 rounded-xl border border-blue-200/90 shadow-2xs">
+            <HighlightedScenario
+              scenario={currentLesson.scenario}
+              spokenText={spokenText}
+              speechCharIndex={speechProgress.charIndex}
+              speechWord={speechProgress.word}
+              isSpeaking={isSpeaking}
+              fontSizePt={12}
+            />
+          </div>
 
           <div className="flex flex-wrap items-center justify-between gap-3 mt-3 pt-2.5 border-t border-blue-200/80">
             {currentLesson.description ? (
-              <div className="text-[12pt] text-blue-950 font-medium flex items-center gap-1.5 bg-white/90 px-3 py-1.5 rounded-lg border border-blue-100 shadow-2xs">
-                <span className="text-blue-600 font-bold shrink-0">🎯 Target:</span>
+              <div
+                style={{ fontSize: '12pt' }}
+                className="text-blue-950 font-medium flex items-center gap-1.5 bg-white/90 px-3 py-1.5 rounded-lg border border-blue-100 shadow-2xs"
+              >
+                <span className="text-blue-600 font-bold shrink-0">🎯 Target (Font Size 12):</span>
                 <span className="font-semibold text-slate-900">{currentLesson.description}</span>
               </div>
             ) : <div />}
@@ -376,6 +412,22 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
               >
                 <Sparkles className="w-3.5 h-3.5 text-amber-300" />
                 <span>Teacher Chigs Intro</span>
+              </button>
+
+              {/* Dedicated Read Problem Aloud Button with Yellow Highlighting */}
+              <button
+                type="button"
+                id="btn-read-question-chigs"
+                onClick={handleReadQuestionOnly}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg font-bold text-xs shadow-xs transition-all cursor-pointer ring-2 ${
+                  isSpeaking && spokenText.includes(currentLesson.scenario)
+                    ? 'bg-yellow-500 hover:bg-yellow-600 text-slate-950 ring-yellow-300 font-extrabold'
+                    : 'bg-amber-100 hover:bg-amber-200 text-amber-950 ring-amber-200 hover:scale-[1.02]'
+                }`}
+                title="Listen to Teacher Chigs read the problem with yellow word-by-word highlight"
+              >
+                <Volume2 className="w-3.5 h-3.5 text-amber-800" />
+                <span>Read Problem (Teacher Chigs)</span>
               </button>
 
               {/* Prominent Listen to Steps Button right on the Question Card */}
@@ -633,10 +685,22 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
                   </div>
                 </div>
 
-                {/* Solving problem statement in Font Size 12 */}
-                <div className="text-[12pt] sm:text-[13pt] text-blue-950 bg-blue-50/95 px-3 py-2 rounded-lg border border-blue-200 mb-2.5 font-medium flex items-start gap-2 shadow-2xs">
-                  <span className="font-bold text-blue-700 shrink-0 mt-0.5">Solving (Font Size 12):</span>
-                  <span className="leading-snug">{currentLesson.scenario}</span>
+                {/* Solving problem statement in Font Size 12 with real-time yellow highlight */}
+                <div
+                  style={{ fontSize: '12pt' }}
+                  className="text-blue-950 bg-blue-50/95 px-3 py-2.5 rounded-lg border border-blue-200 mb-2.5 font-medium flex items-start gap-2 shadow-2xs"
+                >
+                  <span className="font-bold text-blue-700 shrink-0 mt-0.5 text-xs uppercase tracking-wider">Solving (Font Size 12):</span>
+                  <div className="leading-snug flex-1">
+                    <HighlightedScenario
+                      scenario={currentLesson.scenario}
+                      spokenText={spokenText}
+                      speechCharIndex={speechProgress.charIndex}
+                      speechWord={speechProgress.word}
+                      isSpeaking={isSpeaking}
+                      fontSizePt={12}
+                    />
+                  </div>
                 </div>
 
                 <div className="text-slate-900 font-bold text-sm sm:text-base leading-snug">

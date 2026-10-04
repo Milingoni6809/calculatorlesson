@@ -6,14 +6,61 @@ export interface VoiceStatus {
   activeProvider: string;
 }
 
+export interface SpeechProgressInfo {
+  speaking: boolean;
+  text: string;
+  charIndex: number;
+  word: string;
+  progress: number; // 0.0 to 1.0
+}
+
+export interface TextSpan {
+  word: string;
+  cleanWord: string;
+  start: number;
+  end: number;
+}
+
+export function extractWordSpans(text: string): TextSpan[] {
+  if (!text) return [];
+  const spans: TextSpan[] = [];
+  const regex = /\S+/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    spans.push({
+      word: match[0],
+      cleanWord: match[0].replace(/[^\w]/g, '').toLowerCase(),
+      start: match.index,
+      end: match.index + match[0].length,
+    });
+  }
+  return spans;
+}
+
+export function findWordAtChar(spans: TextSpan[], charIndex: number): string {
+  if (spans.length === 0) return '';
+  const exact = spans.find((s) => charIndex >= s.start && charIndex < s.end);
+  if (exact) return exact.word;
+  const closest = spans.find((s) => charIndex <= s.end);
+  if (closest) return closest.word;
+  return spans[spans.length - 1].word;
+}
+
 // In-memory audio cache for synthesized audio base64
 const audioCache = new Map<string, { audioContent: string; mimeType: string; source: string }>();
 
 let currentAudio: HTMLAudioElement | null = null;
+let currentAudioTicker: number | null = null;
 let isCurrentlySpeaking = false;
-const speechListeners = new Set<(speaking: boolean, text: string) => void>();
 let activeSpokenText = '';
+let activeCharIndex = 0;
+let activeSpokenWord = '';
+let activeProgress = 0;
+let progressTicker: number | null = null;
 let sharedAudioCtx: AudioContext | null = null;
+
+const speechListeners = new Set<(speaking: boolean, text: string) => void>();
+const progressListeners = new Set<(info: SpeechProgressInfo) => void>();
 
 // Preload voices as soon as module is imported
 if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -37,10 +84,37 @@ export function subscribeSpeechState(listener: (speaking: boolean, text: string)
   };
 }
 
-function notifyState(speaking: boolean, text: string) {
+export function subscribeSpeechProgress(listener: (info: SpeechProgressInfo) => void) {
+  progressListeners.add(listener);
+  listener({
+    speaking: isCurrentlySpeaking,
+    text: activeSpokenText,
+    charIndex: activeCharIndex,
+    word: activeSpokenWord,
+    progress: activeProgress,
+  });
+  return () => {
+    progressListeners.delete(listener);
+  };
+}
+
+function notifyState(speaking: boolean, text: string, charIndex = 0, word = '', progress = 0) {
   isCurrentlySpeaking = speaking;
   activeSpokenText = text;
+  activeCharIndex = charIndex;
+  activeSpokenWord = word;
+  activeProgress = progress;
+
+  const info: SpeechProgressInfo = {
+    speaking,
+    text,
+    charIndex,
+    word,
+    progress,
+  };
+
   speechListeners.forEach((l) => l(speaking, text));
+  progressListeners.forEach((l) => l(info));
 }
 
 // Unlock audio context and speech synthesis on user interaction
@@ -116,6 +190,14 @@ export function formatSpeechText(text: string): string {
 
 // Stop any currently playing audio or speech synthesis
 export function stopInstructionSpeech() {
+  if (progressTicker) {
+    clearInterval(progressTicker);
+    progressTicker = null;
+  }
+  if (currentAudioTicker) {
+    clearInterval(currentAudioTicker);
+    currentAudioTicker = null;
+  }
   if (currentAudio) {
     currentAudio.pause();
     currentAudio.currentTime = 0;
@@ -129,7 +211,7 @@ export function stopInstructionSpeech() {
       // ignore
     }
   }
-  notifyState(false, '');
+  notifyState(false, '', 0, '', 0);
 }
 
 export function isInstructionSpeaking(): boolean {
@@ -175,28 +257,59 @@ export async function playInstructionSpeech(
   const rate = options.rate ?? 1.0;
   const volume = options.volume ?? 1.0;
 
-  // Direct speech start without interfering chime intro
-  notifyState(true, rawText);
+  // Direct speech start with initial state and progress tracker
+  const spans = extractWordSpans(rawText);
+  const estimatedDurationSec = Math.max(1, spans.length / (2.5 * rate));
+  const startTime = Date.now();
+
+  notifyState(true, rawText, 0, spans[0]?.word || '', 0);
   options.onStart?.();
+
+  if (progressTicker) clearInterval(progressTicker);
+  progressTicker = window.setInterval(() => {
+    if (!isCurrentlySpeaking) {
+      if (progressTicker) clearInterval(progressTicker);
+      return;
+    }
+    const elapsedSec = (Date.now() - startTime) / 1000;
+    const progress = Math.min(0.99, elapsedSec / estimatedDurationSec);
+    const charIndex = Math.min(rawText.length - 1, Math.floor(progress * rawText.length));
+    const currentWord = findWordAtChar(spans, charIndex);
+
+    notifyState(true, rawText, charIndex, currentWord, progress);
+  }, 40);
+
+  const cleanup = () => {
+    if (progressTicker) {
+      clearInterval(progressTicker);
+      progressTicker = null;
+    }
+    if (currentAudioTicker) {
+      clearInterval(currentAudioTicker);
+      currentAudioTicker = null;
+    }
+    notifyState(false, '', 0, '', 0);
+  };
 
   // 1. Check in-memory audio cache for synthesized Inworld Chigoxa audio
   const cacheKey = `Chigoxa:${formattedText}`;
   if (audioCache.has(cacheKey)) {
     const cached = audioCache.get(cacheKey)!;
     playAudioData(
+      rawText,
       cached.audioContent,
       cached.mimeType,
       volume,
       rate,
       () => {
-        notifyState(false, '');
+        cleanup();
         options.onEnd?.();
       },
       (err) => {
         if (options.allowDeviceFallback) {
-          speakWithBrowserSynthesis(formattedText, rate, volume, options);
+          speakWithBrowserSynthesis(rawText, formattedText, rate, volume, options, cleanup);
         } else {
-          notifyState(false, '');
+          cleanup();
           options.onError?.(err);
         }
       }
@@ -227,19 +340,20 @@ export async function playInstructionSpeech(
         });
 
         playAudioData(
+          rawText,
           data.audioContent,
           data.mimeType || 'audio/mp3',
           volume,
           rate,
           () => {
-            notifyState(false, '');
+            cleanup();
             options.onEnd?.();
           },
           (err) => {
             if (options.allowDeviceFallback) {
-              speakWithBrowserSynthesis(formattedText, rate, volume, options);
+              speakWithBrowserSynthesis(rawText, formattedText, rate, volume, options, cleanup);
             } else {
-              notifyState(false, '');
+              cleanup();
               options.onError?.(err);
             }
           }
@@ -253,23 +367,24 @@ export async function playInstructionSpeech(
 
   // 3. If Inworld Chigoxa key is missing, ONLY use device speech if explicitly allowed!
   if (options.allowDeviceFallback) {
-    speakWithBrowserSynthesis(formattedText, rate, volume, options);
+    speakWithBrowserSynthesis(rawText, formattedText, rate, volume, options, cleanup);
   } else {
-    // Notify completion without playing unwanted internet/browser voices
-    notifyState(false, '');
+    cleanup();
     options.onError?.(new Error('INWORLD_API_KEY required for Chigoxa voice'));
   }
 }
 
 // Browser speech synthesis optimized for Chigoxa voice delivery
 function speakWithBrowserSynthesis(
+  rawText: string,
   text: string,
   rate: number,
   volume: number,
-  options: { onEnd?: () => void; onError?: (err: any) => void }
+  options: { onEnd?: () => void; onError?: (err: any) => void },
+  cleanup: () => void
 ) {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-    notifyState(false, '');
+    cleanup();
     options.onError?.(new Error('Speech synthesis is not supported on this browser.'));
     return;
   }
@@ -304,18 +419,29 @@ function speakWithBrowserSynthesis(
     utterance.volume = Math.max(0.1, Math.min(1.0, volume));
 
     utterance.onstart = () => {
-      notifyState(true, text);
+      notifyState(true, rawText, 0, '', 0);
+    };
+
+    const spans = extractWordSpans(rawText);
+    utterance.onboundary = (event) => {
+      if (event.name === 'word' || !event.name) {
+        const spokenChar = event.charIndex;
+        const progress = Math.min(1, spokenChar / Math.max(1, text.length));
+        const rawChar = Math.min(rawText.length - 1, Math.floor(progress * rawText.length));
+        const currentWord = findWordAtChar(spans, rawChar);
+        notifyState(true, rawText, rawChar, currentWord, progress);
+      }
     };
 
     utterance.onend = () => {
       (window as unknown as { __chigoxa_active_utterance: unknown }).__chigoxa_active_utterance = null;
-      notifyState(false, '');
+      cleanup();
       options.onEnd?.();
     };
 
     utterance.onerror = () => {
       (window as unknown as { __chigoxa_active_utterance: unknown }).__chigoxa_active_utterance = null;
-      notifyState(false, '');
+      cleanup();
       options.onEnd?.();
     };
 
@@ -331,13 +457,14 @@ function speakWithBrowserSynthesis(
     window.speechSynthesis.speak(utterance);
     window.speechSynthesis.resume();
   } catch (err) {
-    notifyState(false, '');
+    cleanup();
     options.onError?.(err);
   }
 }
 
 // Play base64 audio blob
 function playAudioData(
+  rawText: string,
   base64Audio: string,
   mimeType: string,
   volume: number,
@@ -352,17 +479,47 @@ function playAudioData(
     audio.volume = Math.max(0, Math.min(1, volume));
     audio.playbackRate = Math.max(0.5, Math.min(2.0, rate));
 
+    const spans = extractWordSpans(rawText);
+
+    if (currentAudioTicker) {
+      clearInterval(currentAudioTicker);
+      currentAudioTicker = null;
+    }
+
+    const updateAudioProgress = () => {
+      if (!audio || !audio.duration) return;
+      const progress = Math.min(0.999, audio.currentTime / audio.duration);
+      const rawChar = Math.min(rawText.length - 1, Math.floor(progress * rawText.length));
+      const currentWord = findWordAtChar(spans, rawChar);
+      notifyState(true, rawText, rawChar, currentWord, progress);
+    };
+
+    currentAudioTicker = window.setInterval(updateAudioProgress, 35);
+    audio.ontimeupdate = updateAudioProgress;
+
     audio.onended = () => {
+      if (currentAudioTicker) {
+        clearInterval(currentAudioTicker);
+        currentAudioTicker = null;
+      }
       currentAudio = null;
       onEnd();
     };
 
     audio.onerror = (e) => {
+      if (currentAudioTicker) {
+        clearInterval(currentAudioTicker);
+        currentAudioTicker = null;
+      }
       currentAudio = null;
       onError(e);
     };
 
     audio.play().catch((playErr) => {
+      if (currentAudioTicker) {
+        clearInterval(currentAudioTicker);
+        currentAudioTicker = null;
+      }
       currentAudio = null;
       onError(playErr);
     });
